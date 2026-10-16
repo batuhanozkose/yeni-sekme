@@ -165,18 +165,7 @@ export async function saveProviderBlock(providerId: string, block: ProviderBlock
   });
 }
 
-/** Read-modify-write one provider-scoped map. */
-async function setForProvider(key: string, providerId: string, value: string): Promise<void> {
-  const stored = await browser.storage.local.get(key);
-  const map = asRecord(stored[key]);
-  map[providerId] = value;
-  await browser.storage.local.set({ [key]: map });
-}
-
 export const saveProvider = (id: string) => browser.storage.local.set({ [KEYS.provider]: id });
-export const saveApiKey = (id: string, key: string) => setForProvider(KEYS.apiKeys, id, key);
-export const saveModel = (id: string, model: string) => setForProvider(KEYS.models, id, model);
-export const saveBaseUrl = (id: string, url: string) => setForProvider(KEYS.baseUrls, id, url);
 export const saveLanguage = (language: Language) => browser.storage.local.set({ [KEYS.language]: language });
 export const saveAutoRebuild = (on: boolean) => browser.storage.local.set({ [KEYS.autoRebuild]: on });
 export const saveRebuildInterval = (hours: number) =>
