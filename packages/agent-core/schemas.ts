@@ -13,6 +13,33 @@ export const OUTPUT_PATH = "/homepage.tsx";
 /** Pages the agent can read. Matches the getPageHtml batch cap. */
 export const PAGE_DIR = "/pages";
 
+/**
+ * Every cap in one place, because they appear in three: the schema the model
+ * reads, the prose in the prompt, and the handler that has to enforce them.
+ */
+export const DEFAULTS = {
+  daysToAnalyze: 14,
+  maxResults: 30,
+  loadDelayMs: 8000,
+  /**
+   * Pages one build may open. Each one is a real tab in the user's browser plus
+   * a settle delay, so this is a wall-clock and browser budget, not a context
+   * one — the pages are read through grep/read rather than put in the prompt.
+   */
+  maxPages: 10,
+  /** Cap on titles carried per domain in the digest. */
+  sampleTitles: 5,
+  /** Anthropic requires an output cap; OpenAI-compatible servers choose their own. */
+  maxTokens: 8192,
+  /** Line-oriented tools report truncation rather than silently cutting results. */
+  grepMaxResults: 80,
+  grepMaxLineLength: 400,
+  readLines: 250,
+  readMaxLines: 500,
+  /** Characters returned by one `read`. Keeps a wide range from flooding context. */
+  readMaxChars: 24_000,
+} as const;
+
 export const GET_HISTORY_SCHEMA: ToolInputSchema = {
   type: "object",
   properties: {
@@ -20,13 +47,13 @@ export const GET_HISTORY_SCHEMA: ToolInputSchema = {
       type: "integer",
       minimum: 1,
       maximum: 90,
-      description: "How many days of history to analyze. Default 14.",
+      description: `How many days of history to analyze. Default ${DEFAULTS.daysToAnalyze}.`,
     },
     maxResults: {
       type: "integer",
       minimum: 1,
       maximum: 50,
-      description: "Top N domains by relevance score. Default 30.",
+      description: `Top N domains by relevance score. Default ${DEFAULTS.maxResults}.`,
     },
   },
   required: [],
@@ -38,7 +65,7 @@ export const GET_PAGE_HTML_SCHEMA: ToolInputSchema = {
     urls: {
       type: "array",
       minItems: 1,
-      maxItems: 8,
+      maxItems: DEFAULTS.maxPages,
       items: { type: "string" },
       description:
         "URLs to load in real browser tabs. Authenticated, JS-rendered pages work — " +
@@ -48,7 +75,7 @@ export const GET_PAGE_HTML_SCHEMA: ToolInputSchema = {
       type: "integer",
       minimum: 0,
       maximum: 30000,
-      description: "Extra wait after load, for lazy-rendered content. Default 8000.",
+      description: `Extra wait after load, for lazy-rendered content. Default ${DEFAULTS.loadDelayMs}.`,
     },
   },
   required: ["urls"],
@@ -97,7 +124,7 @@ export const READ_SCHEMA: ToolInputSchema = {
       type: "integer",
       minimum: 1,
       maximum: 500,
-      description: "How many lines to return. Default 250.",
+      description: `How many lines to return. Default ${DEFAULTS.readLines}.`,
     },
   },
   required: ["path"],
@@ -112,19 +139,3 @@ export const WRITE_SCHEMA: ToolInputSchema = {
   required: ["path", "content"],
 };
 
-export const DEFAULTS = {
-  daysToAnalyze: 14,
-  maxResults: 30,
-  loadDelayMs: 8000,
-  /** Cap on titles carried per domain in the digest. */
-  sampleTitles: 5,
-  /** Anthropic requires an output cap; OpenAI-compatible servers choose their own. */
-  maxTokens: 8192,
-  /** Line-oriented tools report truncation rather than silently cutting results. */
-  grepMaxResults: 80,
-  grepMaxLineLength: 400,
-  readLines: 250,
-  readMaxLines: 500,
-  /** Characters returned by one `read`. Keeps a wide range from flooding context. */
-  readMaxChars: 24_000,
-} as const;

@@ -180,15 +180,22 @@ async function getHistory(call: ToolCall, ctx: ToolContext): Promise<GetHistoryR
 }
 
 async function getPageHtml(call: ToolCall, ctx: ToolContext): Promise<GetPageHtmlResult> {
-  const urls = Array.isArray(call.input.urls) ? call.input.urls.map(asString).filter(Boolean) : [];
-  if (!urls.length) throw new Error("getPageHtml needs at least one url");
+  const requested = Array.isArray(call.input.urls) ? call.input.urls.map(asString).filter(Boolean) : [];
+  if (!requested.length) throw new Error("getPageHtml needs at least one url");
+
+  // The schema states this cap in front of the model; enforce it here too. A
+  // provider that does not validate tool inputs would otherwise let one call
+  // open dozens of tabs in the user's browser, each with its own settle delay.
+  const urls = requested.slice(0, DEFAULTS.maxPages);
   const loadDelayMs = asInt(call.input.loadDelayMs, DEFAULTS.loadDelayMs, 0, 30_000);
 
   ctx.emit.phase("scraping", `${urls.length} pages`);
   const blockedSites = await ctx.blockedSites();
 
   const allowed: string[] = [];
-  const failed: GetPageHtmlResult["failed"] = [];
+  const failed: GetPageHtmlResult["failed"] = requested
+    .slice(DEFAULTS.maxPages)
+    .map((url) => ({ url, reason: `only ${DEFAULTS.maxPages} pages can be opened per call` }));
   for (const url of urls) {
     // Match on the URL the browser will load; malformed URLs never reach the signed-in browser.
     if (isAllowedUrl(url, blockedSites)) allowed.push(url);

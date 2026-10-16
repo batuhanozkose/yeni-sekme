@@ -1,4 +1,4 @@
-import { OUTPUT_PATH } from "./schemas";
+import { DEFAULTS, OUTPUT_PATH } from "./schemas";
 import type { Language } from "./types";
 
 /**
@@ -21,7 +21,7 @@ You have four capabilities:
 1. Call getHistory once. You get a digest, not the full history. Note
    totalSitesSeen: it tells you how much you are NOT seeing.
 
-2. Choose up to 8 URLs worth scraping. Prefer domains whose front page carries
+2. Choose up to ${DEFAULTS.maxPages} URLs worth scraping. Prefer domains whose front page carries
    fresh, datable content the user actually follows — news, feeds, forums,
    social timelines, blogs. Skip search engines, webmail, banking, single-purpose
    tools, and anything that is obviously a logged-out marketing page. Scrape the

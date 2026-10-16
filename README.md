@@ -16,7 +16,7 @@ terminal, a zine.
 
 > **Privacy, up front.** The agent runs inside the extension. It reads your history
 > in the browser and opens pages in your signed-in browser, then sends that
-> material — the domains it visited, a few page titles, and the text of up to 8
+> material — the domains it visited, a few page titles, and the text of up to 10
 > pages — to the model provider you configure, using your own key. Nothing goes
 > anywhere else: there is no server in this project and no sandbox to upload pages
 > to. Point it at a local model and nothing leaves your machine at all. More detail
@@ -123,7 +123,7 @@ failed build until the next interval, so it never loops.
 - **Cost.** Each build is a handful of model calls billed to your key. What it
   costs depends on the model and on how much it reads. A local model is free, and
   you can turn off automatic rebuilds to build only when you ask.
-- **What it can see.** It ranks the sites in your history and opens up to 8 of
+- **What it can see.** It ranks the sites in your history and opens up to 10 of
   them per build. It skips search engines, webmail, banking and logged-out
   marketing pages. Anything it can't open is reported, not hidden.
 - **Links are real.** Pages are rendered to text with their links already
@@ -138,7 +138,7 @@ failed build until the next interval, so it never loops.
 ## How it works
 
 1. **`getHistory`**: the agent gets a ranked summary of your most-visited domains.
-2. **`getPageHtml`**: it picks up to 8 pages, which the extension opens in a
+2. **`getPageHtml`**: it picks up to 10 pages, which the extension opens in a
    background window and renders to readable text.
 3. **`grep` / `read`**: the agent pulls headlines, posts and links out of those
    pages.

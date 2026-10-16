@@ -201,3 +201,24 @@ test("drops pages that redirected to a blocked host, and keeps their text out of
   const everywhere = JSON.stringify({ pageResult, transcript, persisted: [...store.data.values()] });
   expect(everywhere).not.toContain("quarterly numbers");
 });
+
+test("opens no more pages per call than the documented cap", async () => {
+  // One over the cap, so the boundary is the thing under test.
+  const urls = Array.from({ length: 13 }, (_, i) => `https://site-${i}.test/`);
+  const opened: string[][] = [];
+
+  const { pageResult } = await runTools(urls, {
+    blockedSites: [],
+    scrape: async ({ urls: requested }) => {
+      opened.push(requested);
+      return { pages: [], failed: [] };
+    },
+  });
+
+  expect(opened).toEqual([urls.slice(0, 10)]);
+  // The overflow is reported, not silently dropped: the model should learn that
+  // it asked for more than it is allowed.
+  expect(pageResult.failed).toEqual(
+    urls.slice(10).map((url) => ({ url, reason: "only 10 pages can be opened per call" })),
+  );
+});
