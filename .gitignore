@@ -9,9 +9,12 @@ coverage/
 .env.*
 !.env.example
 
-# Harness state (agent/environment IDs) and generated homepages
+# Harness state (the run in progress) and generated homepages
 .agent-state.json
 harness/out/
+
+# Amp orb portals (local service URLs)
+.amp/portals/
 
 # Editors / OS
 .vscode/

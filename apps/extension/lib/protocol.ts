@@ -54,13 +54,26 @@ export type BuildMsg =
  * that interleave (thinking ↔ analyzing fire repeatedly); each maps to a step
  * here. `thinking` and `error` deliberately map to none, so they never move the
  * stepper.
+ *
+ * Keys, not labels: this module is imported by the service worker, which must
+ * not pull React in, so the strings live in lib/i18n.tsx instead.
  */
-export const BUILD_STEPS: { label: string; phases: RunPhase[] }[] = [
-  { label: "Preparing agent", phases: ["setup", "session-create"] },
-  { label: "Reading your history", phases: ["history"] },
-  { label: "Opening pages in your browser", phases: ["scraping"] },
-  { label: "Analyzing pages", phases: ["analyzing"] },
-  { label: "Writing your homepage", phases: ["writing", "cleanup", "done"] },
+export const BUILD_STEP_KEYS = [
+  "step.prepare",
+  "step.history",
+  "step.scraping",
+  "step.analyzing",
+  "step.writing",
+] as const;
+
+export type BuildStepKey = (typeof BUILD_STEP_KEYS)[number];
+
+export const BUILD_STEPS: { key: BuildStepKey; phases: RunPhase[] }[] = [
+  { key: "step.prepare", phases: ["setup"] },
+  { key: "step.history", phases: ["history"] },
+  { key: "step.scraping", phases: ["scraping"] },
+  { key: "step.analyzing", phases: ["analyzing"] },
+  { key: "step.writing", phases: ["writing", "cleanup", "done"] },
 ];
 
 /** Which step a phase belongs to, or `undefined` if it shouldn't move the stepper. */

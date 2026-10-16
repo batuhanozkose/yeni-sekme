@@ -13,8 +13,10 @@ export default defineConfig({
       "storage", //       API key, settings, the built homepage
       "alarms", //        heartbeat: scheduled rebuilds + reattach after a worker kill
       "notifications", // surface a failed headless rebuild when no tab is open
+      "unlimitedStorage", // the run's scraped pages, so a killed worker can resume
     ],
-    // Needed to scrape arbitrary pages; also exempts api.anthropic.com from CORS.
+    // Needed to scrape arbitrary pages, and to call any model provider
+    // directly from the worker without a CORS preflight failing.
     host_permissions: ["<all_urls>"],
   },
 });

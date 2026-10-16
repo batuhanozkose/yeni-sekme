@@ -1,28 +1,62 @@
 import { useCallback, useEffect, useState } from "react";
-import { DEFAULT_MODEL, DEFAULT_BLOCKED_SITES, type HomepageModel } from "@homepage/agent-core";
 import { DEFAULT_REBUILD_INTERVAL_HOURS } from "@/lib/auto-rebuild";
+import { useT, LanguageProvider } from "@/lib/i18n";
 import { BUILD_STEPS } from "@/lib/protocol";
-import { KEYS, extensionStore, loadHomepage, loadSettings, saveSetting } from "@/lib/storage";
+import {
+  KEYS,
+  extensionStore,
+  loadHomepage,
+  loadSettings,
+  missingSetup,
+  saveAutoRebuild,
+  saveLanguage,
+  savePromptAndBlockedSites,
+  saveProvider,
+  saveProviderBlock,
+  saveRebuildInterval,
+  type Settings,
+} from "@/lib/storage";
 import { toRenderable } from "@/lib/transpile";
-import { ApiKeySetup } from "./components/ApiKeySetup";
 import { BuildProgress } from "./components/BuildProgress";
 import { HomepagePreview } from "./components/HomepagePreview";
-import { SettingsModal } from "./components/SettingsModal";
+import { ProviderSetup } from "./components/ProviderSetup";
+import type { ProviderDraft } from "./components/ProviderFields";
+import { SettingsModal, type SettingsDraft } from "./components/SettingsModal";
 import { btn, errorBox } from "./components/ui";
 import { useHomepageBuild } from "./useHomepageBuild";
 
 export default function App() {
-  const [loading, setLoading] = useState(true);
-  const [apiKey, setApiKey] = useState<string | null>(null);
-  const [systemPrompt, setSystemPrompt] = useState("");
-  const [blockedSites, setBlockedSites] = useState<string[]>(DEFAULT_BLOCKED_SITES);
-  const [model, setModel] = useState<HomepageModel>(DEFAULT_MODEL);
-  const [autoRebuild, setAutoRebuild] = useState(true);
-  const [intervalHours, setIntervalHours] = useState(DEFAULT_REBUILD_INTERVAL_HOURS);
+  const [settings, setSettings] = useState<Settings | null>(null);
+
+  useEffect(() => {
+    void loadSettings().then(setSettings);
+  }, []);
+
+  // Language-neutral while loading: the setting that decides the language is
+  // what we are waiting for.
+  if (!settings) {
+    return <div style={{ padding: 40, textAlign: "center", color: "#bbb", fontFamily: "system-ui" }}>●</div>;
+  }
+
+  return (
+    <LanguageProvider language={settings.language}>
+      <Home settings={settings} onSettingsChange={setSettings} />
+    </LanguageProvider>
+  );
+}
+
+function Home({
+  settings,
+  onSettingsChange,
+}: {
+  settings: Settings;
+  onSettingsChange: (next: Settings) => void;
+}) {
+  const t = useT();
   /** Transpiled homepage, ready for Sandpack. */
   const [renderedCode, setRenderedCode] = useState<string | null>(null);
-  /** A session left mid-flight, offered as "Resume interrupted build". */
-  const [resumable, setResumable] = useState<string | null>(null);
+  /** A run left mid-flight, offered as "Resume interrupted build". */
+  const [resumable, setResumable] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   /** Expand the full progress view over an existing homepage. */
   const [viewProgress, setViewProgress] = useState(false);
@@ -30,6 +64,10 @@ export default function App() {
   const [dismissedError, setDismissedError] = useState<string | null>(null);
 
   const { state, build, cancel } = useHomepageBuild((code) => setRenderedCode(toRenderable(code)));
+
+  useEffect(() => {
+    document.documentElement.lang = settings.language;
+  }, [settings.language]);
 
   // Once a build finishes, drop back to the homepage view.
   useEffect(() => {
@@ -40,59 +78,83 @@ export default function App() {
   // useHomepageBuild surfaces any build already in flight.
   useEffect(() => {
     (async () => {
-      try {
-        const [settings, homepage, activeSession] = await Promise.all([
-          loadSettings(),
-          loadHomepage(),
-          extensionStore.get<string>(KEYS.activeSessionId),
-        ]);
-        setApiKey(settings.apiKey);
-        setSystemPrompt(settings.systemPrompt);
-        setBlockedSites(settings.blockedSites);
-        setModel(settings.model);
-        setAutoRebuild(settings.autoRebuild);
-        setIntervalHours(settings.rebuildIntervalHours ?? DEFAULT_REBUILD_INTERVAL_HOURS);
-        setResumable(activeSession ?? null);
-        if (homepage?.code) setRenderedCode(toRenderable(homepage.code));
-      } finally {
-        setLoading(false);
-      }
+      const [homepage, run] = await Promise.all([
+        loadHomepage(),
+        extensionStore.get<unknown>(KEYS.activeRun),
+      ]);
+      if (homepage?.code) setRenderedCode(toRenderable(homepage.code));
+      setResumable(Boolean(run));
     })();
   }, []);
 
-  const saveKey = useCallback(async (key: string) => {
-    await saveSetting("apiKey", key);
-    setApiKey(key);
-  }, []);
+  const saveProviderSetup = useCallback(
+    async (draft: ProviderDraft) => {
+      await Promise.all([saveProvider(draft.provider), saveProviderBlock(draft.provider, draft)]);
+      onSettingsChange(await loadSettings());
+    },
+    [onSettingsChange],
+  );
 
-  const savePrompt = useCallback(
-    async (prompt: string, sites: string[]) => {
-      await Promise.all([saveSetting("systemPrompt", prompt), saveSetting("blockedSites", sites)]);
-      setBlockedSites(sites);
-      setSystemPrompt(prompt);
+  const saveSettings = useCallback(
+    async (draft: SettingsDraft) => {
+      await Promise.all([
+        savePromptAndBlockedSites(draft.systemPrompt, draft.blockedSites),
+        saveProvider(draft.provider.provider),
+        saveProviderBlock(draft.provider.provider, draft.provider),
+        saveLanguage(draft.language),
+      ]);
+      onSettingsChange(await loadSettings());
       setShowSettings(false);
       setRenderedCode(null);
       build();
     },
-    [build],
+    [build, onSettingsChange],
   );
 
   // These persist immediately; the worker reads them on its next heartbeat or build.
-  const changeModel = useCallback(async (next: HomepageModel) => {
-    setModel(next);
-    await saveSetting("model", next);
-  }, []);
-  const toggleAutoRebuild = useCallback(async (next: boolean) => {
-    setAutoRebuild(next);
-    await saveSetting("autoRebuild", next);
-  }, []);
-  const changeInterval = useCallback(async (next: number) => {
-    setIntervalHours(next);
-    await saveSetting("rebuildIntervalHours", next);
-  }, []);
+  const changeAutoRebuild = useCallback(
+    async (next: boolean) => {
+      await saveAutoRebuild(next);
+      onSettingsChange(await loadSettings());
+    },
+    [onSettingsChange],
+  );
+  const changeInterval = useCallback(
+    async (next: number) => {
+      await saveRebuildInterval(next);
+      onSettingsChange(await loadSettings());
+    },
+    [onSettingsChange],
+  );
 
-  if (loading) return <div style={{ padding: 20, textAlign: "center" }}>Loading…</div>;
-  if (!apiKey) return <ApiKeySetup onSave={saveKey} />;
+  // Rendered once and reused: both the "no homepage yet" screen and the
+  // finished-homepage view can open settings.
+  const settingsModal = showSettings && (
+    <SettingsModal
+      settings={settings}
+      intervalHours={settings.rebuildIntervalHours ?? DEFAULT_REBUILD_INTERVAL_HOURS}
+      onChangeAutoRebuild={changeAutoRebuild}
+      onChangeInterval={changeInterval}
+      onClose={() => setShowSettings(false)}
+      onSave={saveSettings}
+    />
+  );
+
+  // Nothing works without a provider, so this screen comes before anything else.
+  if (missingSetup(settings)) {
+    return (
+      <ProviderSetup
+        initial={{
+          provider: settings.provider,
+          apiKey: settings.apiKey,
+          model: settings.model,
+          baseUrl: settings.baseUrl,
+        }}
+        byProvider={settings.byProvider}
+        onSave={saveProviderSetup}
+      />
+    );
+  }
 
   // With no homepage to fall back to, a running build takes over the tab.
   if (state.running && (!renderedCode || viewProgress)) {
@@ -108,24 +170,29 @@ export default function App() {
   if (!renderedCode) {
     return (
       <div style={{ maxWidth: 560, margin: "14vh auto", padding: 24, fontFamily: "system-ui" }}>
-        <h1 style={{ fontSize: 26 }}>Build your homepage</h1>
-        <p style={{ color: "#555", lineHeight: 1.6 }}>
-          The agent reads your browsing history, opens the pages you actually follow, and writes a
-          homepage from what it finds today.
-        </p>
+        <h1 style={{ fontSize: 26 }}>{t("app.buildTitle")}</h1>
+        <p style={{ color: "#555", lineHeight: 1.6 }}>{t("app.buildBlurb")}</p>
         {state.error && (
           <div style={{ ...errorBox, margin: "16px 0", padding: 12, borderRadius: 4 }}>{state.error}</div>
         )}
         <div style={{ display: "flex", gap: 12, marginTop: 16 }}>
           <button style={btn} onClick={() => build()}>
-            Build today&apos;s homepage
+            {t("app.buildCta")}
           </button>
           {resumable && (
             <button style={{ ...btn, backgroundColor: "#555" }} onClick={() => build({ resume: true })}>
-              Resume interrupted build
+              {t("app.buildResume")}
             </button>
           )}
+          <button
+            style={{ ...btn, backgroundColor: "white", color: "#333", border: "1px solid #ddd" }}
+            onClick={() => setShowSettings(true)}
+            title={t("app.settingsTitle")}
+          >
+            {t("app.settings")}
+          </button>
         </div>
+        {showSettings && settingsModal}
       </div>
     );
   }
@@ -141,7 +208,7 @@ export default function App() {
           <button
             style={{ ...btn, backgroundColor: "#0a7", display: "flex", alignItems: "center", gap: 8 }}
             onClick={() => setViewProgress(true)}
-            title="View build progress"
+            title={t("app.progressTitle")}
           >
             <span
               style={{
@@ -152,15 +219,15 @@ export default function App() {
                 animation: "hb-pulse 1.2s ease-in-out infinite",
               }}
             />
-            Building… {Math.min(state.stepIndex + 1, BUILD_STEPS.length)}/{BUILD_STEPS.length}
+            {t("app.building", { step: Math.min(state.stepIndex + 1, BUILD_STEPS.length), total: BUILD_STEPS.length })}
           </button>
         ) : (
-          <button style={btn} onClick={() => build()} title="Rebuild now">
-            ↻ Rebuild
+          <button style={btn} onClick={() => build()} title={t("app.rebuildNowTitle")}>
+            {t("app.rebuild")}
           </button>
         )}
-        <button style={btn} onClick={() => setShowSettings(true)} title="Customize homepage">
-          ⚙️ Settings
+        <button style={btn} onClick={() => setShowSettings(true)} title={t("app.settingsTitle")}>
+          {t("app.settings")}
         </button>
       </div>
 
@@ -181,10 +248,10 @@ export default function App() {
           }}
         >
           <span style={{ flex: 1 }}>
-            <b>Build failed.</b> {state.error}
+            <b>{t("app.failed")}</b> {state.error}
           </span>
           <button style={{ ...btn, padding: "4px 10px", backgroundColor: "#a02620" }} onClick={() => build()}>
-            Retry
+            {t("app.retry")}
           </button>
           <button
             onClick={() => setDismissedError(state.error)}
@@ -196,7 +263,7 @@ export default function App() {
               fontSize: 16,
               lineHeight: 1,
             }}
-            title="Dismiss"
+            title={t("app.dismiss")}
           >
             ✕
           </button>
@@ -205,20 +272,7 @@ export default function App() {
 
       <HomepagePreview code={renderedCode} />
 
-      {showSettings && (
-        <SettingsModal
-          initialPrompt={systemPrompt}
-          blockedSites={blockedSites}
-          model={model}
-          onChangeModel={changeModel}
-          autoRebuild={autoRebuild}
-          onToggleAutoRebuild={toggleAutoRebuild}
-          intervalHours={intervalHours}
-          onChangeInterval={changeInterval}
-          onClose={() => setShowSettings(false)}
-          onSave={savePrompt}
-        />
-      )}
+      {settingsModal}
     </div>
   );
 }

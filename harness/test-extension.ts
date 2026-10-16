@@ -3,24 +3,57 @@
  * of the system the Bun harness can't reach:
  *
  *   1. the MV3 service worker registers,
- *   2. the new-tab override renders (the API-key screen on a fresh profile),
+ *   2. the new-tab override renders (the provider setup screen on a fresh profile),
  *   3. the worker answers `subscribe` on the build port with a snapshot,
- *   4. `startBuild` with no API key fails cleanly with an error message,
+ *   4. `startBuild` with no credentials fails cleanly with an error message,
  *   5. `chrome.history` is readable, so the `history` permission is real.
  *
  * No API calls are made. Chrome 136+ ignores `--load-extension`, so the
  * extension is loaded over CDP's Extensions domain instead.
  *
  * Run: pnpm build && pnpm extension:test
- * Set CHROME_PATH if Chrome isn't at the default macOS location.
+ * Chrome is discovered (see findChrome); set CHROME_PATH to override.
  */
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
-const CHROME =
-  process.env.CHROME_PATH ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+/**
+ * Chrome is wherever the machine put it. macOS keeps the app bundle in one fixed
+ * place; Linux has no convention at all, so this checks the places a Chromium
+ * browser plausibly lands — a system install, or the versioned cache Amp orbs
+ * and Playwright-style tooling use — before giving up with the list of what it
+ * looked for. `CHROME_PATH` still wins when set.
+ */
+function findChrome(): string {
+  if (process.env.CHROME_PATH) return process.env.CHROME_PATH;
+
+  const candidates = [
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+    "/opt/google/chrome/chrome",
+  ];
+
+  const browserCache = join(homedir(), ".agent-browser", "browsers");
+  if (existsSync(browserCache)) {
+    for (const entry of readdirSync(browserCache).sort().reverse()) {
+      candidates.push(join(browserCache, entry, "chrome"));
+    }
+  }
+
+  const found = candidates.find((path) => existsSync(path));
+  if (!found) {
+    console.error(`No Chrome found. Set CHROME_PATH. Looked in:\n  ${candidates.join("\n  ")}`);
+    process.exit(1);
+  }
+  return found;
+}
+
+const CHROME = findChrome();
 const EXT = join(import.meta.dir, "../apps/extension/.output/chrome-mv3");
 const PORT = 9333;
 
@@ -151,8 +184,8 @@ try {
   await sleep(2500); // let React mount
   const bodyText = await page.evaluate<string>("document.body.innerText");
   check(
-    "renders the API-key setup screen",
-    /Connect your Anthropic API key/i.test(bodyText),
+    "renders the provider setup screen",
+    /Connect your model provider/i.test(bodyText),
     bodyText.split("\n").filter(Boolean)[0]?.slice(0, 50),
   );
 

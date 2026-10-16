@@ -8,7 +8,8 @@
  */
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { BrowserBridge, KVStore, RawSiteMetadata } from "@homepage/agent-core";
+import { renderPageText } from "@homepage/agent-core";
+import type { BrowserBridge, KVStore, RawSiteMetadata, ScrapedPage } from "@homepage/agent-core";
 
 /** Harness state (cached agent/environment IDs, active session) and output, next to these scripts. */
 export const STATE_PATH = join(import.meta.dir, ".agent-state.json");
@@ -80,16 +81,8 @@ export function fixtureHistory(now = Date.now()): RawSiteMetadata[] {
   ];
 }
 
-/** Crude sanitizer approximating the extension's cleanHtmlForLLM (lib/scraper.ts). */
-function cleanHtml(html: string): string {
-  return html
-    .replace(/<script[\s\S]*?<\/script>/gi, "")
-    .replace(/<style[\s\S]*?<\/style>/gi, "")
-    .replace(/<svg[\s\S]*?<\/svg>/gi, "")
-    .replace(/<!--[\s\S]*?-->/g, "")
-    .replace(/\son\w+="[^"]*"/gi, "")
-    .replace(/\n{3,}/g, "\n\n");
-}
+/** Crude sanitizer superseded by the shared renderer: see renderPageText. */
+export { renderPageText } from "@homepage/agent-core";
 
 function titleOf(html: string, url: string): string {
   const m = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
@@ -103,7 +96,7 @@ export const nodeBridge: BrowserBridge = {
   },
 
   async getPageHtml({ urls }) {
-    const pages: Array<{ url: string; title: string; html: string }> = [];
+    const pages: ScrapedPage[] = [];
     const failed: Array<{ url: string; reason: string }> = [];
 
     await Promise.all(
@@ -118,7 +111,9 @@ export const nodeBridge: BrowserBridge = {
             return;
           }
           const raw = await res.text();
-          pages.push({ url, title: titleOf(raw, url), html: cleanHtml(raw) });
+          // Same renderer the extension uses, so what the harness tests is what
+          // the browser path produces.
+          pages.push({ url, title: titleOf(raw, url), text: renderPageText(raw, url) });
         } catch (err) {
           failed.push({ url, reason: String(err) });
         }

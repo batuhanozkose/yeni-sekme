@@ -1,5 +1,4 @@
-import type { BrowserBridge, ScrapedPage } from "@homepage/agent-core";
-import sanitizeHtml from "sanitize-html";
+import { renderPageText, type BrowserBridge, type ScrapedPage } from "@homepage/agent-core";
 
 type ScrapeReport = Awaited<ReturnType<BrowserBridge["getPageHtml"]>>;
 
@@ -25,60 +24,6 @@ const DEFAULT_OPTIONS: Required<ScrapeOptions> = {
   timeout: 30000, // 30 seconds timeout
   concurrentTabs: 3, // Process up to 3 tabs at once
 };
-
-/** Keep content and links; drop scripts, styles, attributes and empty wrappers. */
-function cleanHtmlForLLM(html: string) {
-  return sanitizeHtml(html, {
-    allowedTags: [
-      // Text content
-      "h1",
-      "h2",
-      "h3",
-      "h4",
-      "h5",
-      "h6",
-      "p",
-      "a",
-      "em",
-      "strong",
-      "b",
-      "i",
-      "blockquote",
-      "code",
-      "pre",
-      // Lists
-      "ul",
-      "ol",
-      "li",
-      // Tables
-      "table",
-      "thead",
-      "tbody",
-      "tr",
-      "th",
-      "td",
-      // Media
-      "img",
-      "figure",
-      "figcaption",
-      // Structure
-      "div",
-      "span",
-      "br",
-      "hr",
-    ],
-    allowedAttributes: {
-      a: ["href", "title"],
-      img: ["src", "alt", "title", "width", "height"],
-      td: ["colspan", "rowspan"],
-      th: ["colspan", "rowspan"],
-    },
-    // Remove empty tags
-    exclusiveFilter: (frame) => {
-      return !frame.text.trim() && !frame.tag.match(/^(img|br|hr)$/);
-    },
-  });
-}
 
 /** Scrape in a separate unfocused window so tabs don't flash in front of the user. */
 async function createScraperWindow(): Promise<number> {
@@ -124,7 +69,7 @@ async function scrapeUrl(
 
     while (retryCount <= opts.maxRetries && !result) {
       try {
-        // Scrolls to trigger lazy content, then returns { title, html }.
+        // Scrolls to trigger lazy content, then returns { url, title, html }.
         const injectionResults = await browser.scripting.executeScript({
           target: { tabId: tab.id! },
           files: ["/content-scripts/scraper.js"],
@@ -164,7 +109,9 @@ async function scrapeUrl(
         url,
         finalUrl: result.url,
         title: result.title,
-        html: cleanHtmlForLLM(result.html),
+        // Relative links are resolved against where the page actually landed,
+        // not where we asked for it.
+        text: renderPageText(result.html, result.url),
       };
     } else {
       console.error(
@@ -179,7 +126,7 @@ async function scrapeUrl(
 }
 
 /**
- * Load each URL in the user's real (logged-in) browser and return sanitized HTML,
+ * Load each URL in the user's real (logged-in) browser and return readable text,
  * reporting failures rather than dropping them — the model needs to know which
  * of the pages it asked for didn't come back.
  */

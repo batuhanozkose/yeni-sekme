@@ -1,7 +1,20 @@
 import { expect, test } from "bun:test";
-import type Anthropic from "@anthropic-ai/sdk";
-import { isBlocked, normalizeBlockList, runHomepageBuild, type BrowserBridge, type KVStore } from "@homepage/agent-core";
+import {
+  STORAGE_KEYS,
+  isBlocked,
+  normalizeBlockList,
+  runHomepageBuild,
+  type BrowserBridge,
+  type ToolResult,
+} from "@homepage/agent-core";
 import { fixtureHistory } from "./node-bridge";
+import { FakeProvider, MemoryKVStore, resultsFor } from "./test-doubles";
+
+/**
+ * The block list is enforced in the tool handlers, not in the prompt, and the
+ * pages it excluded must never reach the model — not in a tool result, not in
+ * the transcript that gets persisted for a resume, nowhere.
+ */
 
 test("normalizes pasted hosts and URLs", () => {
   expect(normalizeBlockList([" HTTPS://WWW.Google.COM/path ", "", " # comment", "*.Example.COM", "google.com"])).toEqual(["google.com", "*.example.com"]);
@@ -21,102 +34,6 @@ test("matches hosts and subdomains without matching lookalikes", () => {
   expect(isBlocked("google.com.evil.test", ["google.com"])).toBe(false);
 });
 
-/** Exercise live and replayed tool dispatch without a network or browser. */
-async function runTools(urls: string[], blockedSites?: string[] | (() => Promise<string[]>), resume = false, afterHistory?: () => void, scrape?: BrowserBridge["getPageHtml"]) {
-  const results: any[] = [];
-  const uploads: string[] = [];
-  const calls: string[][] = [];
-  const logs: string[] = [];
-  const events = [
-    { id: "history", type: "agent.custom_tool_use", name: "getHistory", input: { maxResults: 1 } },
-    { id: "pages", type: "agent.custom_tool_use", name: "getPageHtml", input: { urls } },
-  ];
-  async function* stream() { if (!resume) yield* events; }
-  const client = { beta: {
-    agents: { retrieve: async () => ({}) },
-    environments: { retrieve: async () => ({}) },
-    sessions: {
-      create: async () => ({ id: "session" }),
-      retrieve: async () => ({ status: "idle" }), delete: async () => {},
-      resources: { add: async (_id: string, body: any) => ({ mount_path: body.mount_path }) },
-      events: {
-        stream: async () => stream(),
-        list: async function* () { if (resume) yield* events; },
-        send: async (_id: string, body: any) => {
-          const toolResults = body.events.filter((e: any) => e.type === "user.custom_tool_result");
-          results.push(...toolResults);
-          if (toolResults.some((e: any) => e.custom_tool_use_id === "history")) afterHistory?.();
-        },
-      },
-    },
-    files: {
-      list: async function* () { yield { id: "output", filename: "homepage.tsx" }; },
-      download: async () => new Response("export default function PersonalizedHomepage() {}"),
-      upload: async ({ file }: { file: File }) => { uploads.push(file.name); return { id: `file-${uploads.length}` }; },
-      delete: async () => {},
-    },
-  } } as unknown as Anthropic;
-  const store: KVStore = {
-    get: async <T>(key: string) => (key === "uploadedFileIds" ? [] : "cached") as T,
-    set: async () => {}, remove: async () => {},
-  };
-  const bridge: BrowserBridge = {
-    getHistory: async () => ({ sites: fixtureHistory(), totalSitesSeen: fixtureHistory().length }),
-    getPageHtml: scrape ?? (async ({ urls }) => { calls.push(urls); return { pages: [], failed: urls.map(url => ({ url, reason: "unavailable" })) }; }),
-  };
-  await runHomepageBuild({ client, store, bridge, blockedSites, resumeSessionId: resume ? "session" : undefined, callbacks: { onLog: line => logs.push(line) } });
-  return { results, calls, logs, uploads };
-}
-
-test("filters history before capping and excludes blocked sites from the count", async () => {
-  const { results } = await runTools([], ["news.ycombinator.com"]);
-  const digest = JSON.parse(results[0].content[0].text);
-  expect(digest.totalSitesSeen).toBe(fixtureHistory().length - 1);
-  expect(digest.sites).toHaveLength(1);
-  expect(JSON.stringify(digest)).not.toContain("news.ycombinator.com");
-});
-
-test("uses newly saved blocked sites for the next tool call in an active build", async () => {
-  let savedSites: string[] = [];
-  const { results, calls } = await runTools(
-    ["https://news.ycombinator.com"],
-    async () => savedSites,
-    false,
-    () => { savedSites = ["news.ycombinator.com"]; },
-  );
-  expect(JSON.stringify(JSON.parse(results[0].content[0].text))).toContain("news.ycombinator.com");
-  expect(calls).toEqual([]);
-  expect(JSON.parse(results[1].content[0].text)).toEqual({
-    pages: [],
-    failed: [{ url: "https://news.ycombinator.com", reason: "blocked by the user's settings" }],
-  });
-});
-
-test("never forwards blocked or non-http URLs, including on resume", async () => {
-  const urls = ["https://bank.test", "https://sub.bank.test", "https:/bank.test", "https:\\bank.test", "file:///secret", "chrome://settings", "javascript:alert(1)", "not a url"];
-  for (const resume of [false, true]) {
-    const { results, calls, logs } = await runTools(urls, ["bank.test"], resume);
-    expect(calls).toEqual([]);
-    expect(results[1].is_error).toBeUndefined();
-    expect(JSON.parse(results[1].content[0].text)).toEqual({ pages: [], failed: urls.map(url => ({ url, reason: "blocked by the user's settings" })) });
-    expect(logs).toContain("blocked: 8 url(s)");
-  }
-});
-
-test("only forwards allowed URLs in mixed batches", async () => {
-  const { results, calls } = await runTools(["https://bank.test", "https://public.test"], ["bank.test"]);
-  expect(calls).toEqual([["https://public.test"]]);
-  expect(JSON.parse(results[1].content[0].text).failed).toEqual([
-    { url: "https://bank.test", reason: "blocked by the user's settings" },
-    { url: "https://public.test", reason: "unavailable" },
-  ]);
-});
-
-test("uses defaults when unset and honors an explicitly empty list", async () => {
-  expect((await runTools(["https://mail.google.com"])).calls).toEqual([]);
-  expect((await runTools(["https://mail.google.com"], [])).calls).toEqual([["https://mail.google.com"]]);
-});
-
 test("always blocks loopback, private and local-network hosts", () => {
   for (const url of [
     "http://localhost:5173", "http://127.0.0.2/", "http://0.0.0.0:8080", "http://2130706433/",
@@ -132,18 +49,155 @@ test("always blocks loopback, private and local-network hosts", () => {
   }
 });
 
-test("drops pages that redirected to a blocked host before uploading them", async () => {
+const WRITE_STEP = {
+  tools: [{ name: "write", input: { path: "/homepage.tsx", content: "export default function PersonalizedHomepage() {}" } }],
+};
+
+interface RunToolsOptions {
+  blockedSites?: string[] | (() => Promise<string[]>);
+  resume?: boolean;
+  scrape?: BrowserBridge["getPageHtml"];
+  /** Fires when the loop is about to make model call #n. */
+  atStep?: (step: number) => void;
+}
+
+/** Drive real tool dispatch and real persistence, without a browser or a network. */
+async function runTools(urls: string[], opts: RunToolsOptions = {}) {
+  const calls: string[][] = [];
+  const logs: string[] = [];
+  const store = new MemoryKVStore();
+
+  const steps = [
+    { tools: [{ name: "getHistory", input: { maxResults: 1 } }] },
+    { tools: [{ name: "getPageHtml", input: { urls } }] },
+    WRITE_STEP,
+    { text: "done" },
+  ];
+
+  const provider = new FakeProvider(opts.resume ? steps.slice(1) : steps, {
+    onRequest: (_req, step) => opts.atStep?.(opts.resume ? step + 1 : step),
+  });
+
+  const bridge: BrowserBridge = {
+    getHistory: async () => {
+      const sites = fixtureHistory();
+      return { sites, totalSitesSeen: sites.length };
+    },
+    getPageHtml:
+      opts.scrape ??
+      (async ({ urls: requested }) => {
+        calls.push(requested);
+        return { pages: [], failed: requested.map((url) => ({ url, reason: "unavailable" })) };
+      }),
+  };
+
+  if (opts.resume) {
+    // A run killed the instant the page request went out, with nobody to answer it.
+    await store.set(STORAGE_KEYS.activeRun, {
+      runId: "resumed-run",
+      startedAt: new Date().toISOString(),
+      turns: [
+        { role: "user", text: "kickoff" },
+        { role: "assistant", text: "", toolCalls: [{ id: "pages", name: "getPageHtml", input: { urls } }] },
+      ],
+      deliverable: null,
+      steps: 1,
+      providerId: "fake",
+    });
+  }
+
+  await runHomepageBuild({
+    provider,
+    store,
+    bridge,
+    blockedSites: opts.blockedSites,
+    resume: opts.resume,
+    callbacks: { onLog: (line) => logs.push(line) },
+  });
+
+  const transcript: ToolResult[] = provider.requests.flatMap((req) =>
+    req.turns.flatMap((turn) => (turn.role === "tool_results" ? turn.results : [])),
+  );
+
+  return {
+    calls,
+    logs,
+    store,
+    transcript,
+    digest: resultsFor(provider.lastRequest, "getHistory")[0],
+    pageResult: resultsFor(provider.lastRequest, "getPageHtml")[0],
+  };
+}
+
+test("filters history before capping and excludes blocked sites from the count", async () => {
+  const { digest } = await runTools([], { blockedSites: ["news.ycombinator.com"] });
+  expect(digest.totalSitesSeen).toBe(fixtureHistory().length - 1);
+  expect(digest.sites).toHaveLength(1);
+  expect(JSON.stringify(digest)).not.toContain("news.ycombinator.com");
+});
+
+test("uses newly saved blocked sites for the next tool call in an active build", async () => {
+  let savedSites: string[] = [];
+  const { digest, calls, pageResult } = await runTools(["https://news.ycombinator.com"], {
+    blockedSites: async () => savedSites,
+    // The user saves the list while the build is running.
+    atStep: (step) => {
+      if (step === 1) savedSites = ["news.ycombinator.com"];
+    },
+  });
+
+  // History was taken before the save, so it still carries the domain…
+  expect(JSON.stringify(digest)).toContain("news.ycombinator.com");
+  // …and the very next tool call already respects it, without opening a window.
+  expect(calls).toEqual([]);
+  expect(pageResult).toEqual({
+    pages: [],
+    failed: [{ url: "https://news.ycombinator.com", reason: "blocked by the user's settings" }],
+  });
+});
+
+test("never forwards blocked or non-http URLs, including on resume", async () => {
+  const urls = ["https://bank.test", "https://sub.bank.test", "https:/bank.test", "https:\\bank.test", "file:///secret", "chrome://settings", "javascript:alert(1)", "not a url"];
+  for (const resume of [false, true]) {
+    const { calls, logs, pageResult } = await runTools(urls, { blockedSites: ["bank.test"], resume });
+    expect(calls).toEqual([]);
+    expect(pageResult).toEqual({ pages: [], failed: urls.map((url) => ({ url, reason: "blocked by the user's settings" })) });
+    expect(logs).toContain("blocked: 8 url(s)");
+  }
+});
+
+test("only forwards allowed URLs in mixed batches", async () => {
+  const { calls, pageResult } = await runTools(["https://bank.test", "https://public.test"], { blockedSites: ["bank.test"] });
+  expect(calls).toEqual([["https://public.test"]]);
+  expect(pageResult.failed).toEqual([
+    { url: "https://bank.test", reason: "blocked by the user's settings" },
+    { url: "https://public.test", reason: "unavailable" },
+  ]);
+});
+
+test("uses defaults when unset and honors an explicitly empty list", async () => {
+  expect((await runTools(["https://mail.google.com"])).calls).toEqual([]);
+  expect((await runTools(["https://mail.google.com"], { blockedSites: [] })).calls).toEqual([["https://mail.google.com"]]);
+});
+
+test("drops pages that redirected to a blocked host, and keeps their text out of everything", async () => {
   const redirector = "https://www.google.com/url?q=https://mail.google.com/";
-  const { results, uploads } = await runTools([redirector, "https://public.test/"], ["mail.google.com"], false, undefined, async ({ urls }) => ({
-    pages: [
-      { url: urls[0]!, finalUrl: "https://mail.google.com/mail/u/0/", title: "Inbox", html: "<p>secret</p>" },
-      { url: urls[1]!, finalUrl: "https://public.test/", title: "Public", html: "<p>news</p>" },
-    ],
-    failed: [],
-  }));
-  const out = JSON.parse(results[1].content[0].text);
-  expect(uploads).toHaveLength(1);
-  expect(out.pages.map((p: any) => p.url)).toEqual(["https://public.test/"]);
-  expect(out.failed).toEqual([{ url: redirector, reason: "blocked by the user's settings" }]);
-  expect(JSON.stringify(out)).not.toContain("Inbox");
+  const { pageResult, transcript, store } = await runTools([redirector, "https://public.test/"], {
+    blockedSites: ["mail.google.com"],
+    scrape: async ({ urls }) => ({
+      pages: [
+        { url: urls[0]!, finalUrl: "https://mail.google.com/mail/u/0/", title: "Inbox", text: "Subject: quarterly numbers" },
+        { url: urls[1]!, finalUrl: "https://public.test/", title: "Public", text: "Public news" },
+      ],
+      failed: [],
+    }),
+  });
+
+  expect(pageResult.pages.map((page: any) => page.url)).toEqual(["https://public.test/"]);
+  expect(pageResult.failed).toEqual([{ url: redirector, reason: "blocked by the user's settings" }]);
+
+  // The redirect target's content never reaches the model, the transcript, or
+  // the storage a crash would resume from.
+  const everywhere = JSON.stringify({ pageResult, transcript, persisted: [...store.data.values()] });
+  expect(everywhere).not.toContain("quarterly numbers");
 });

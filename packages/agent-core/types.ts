@@ -5,7 +5,18 @@
  * supplies a bridge backed by `chrome.history` / `chrome.tabs`; the Node test
  * harness supplies one backed by fixtures and `fetch`. Nothing in this package
  * may import `chrome`, `browser`, or `node:*`.
+ *
+ * There is no server and no remote sandbox: the agent loop, the files the agent
+ * reads, and the model call all live in whichever host is running this. A
+ * `ModelProvider` is the only thing that leaves the process.
  */
+
+/** UI and generated-page language. */
+export type Language = "en" | "tr";
+
+// ---------------------------------------------------------------------------
+// what the browser provides
+// ---------------------------------------------------------------------------
 
 /** One domain's worth of browsing history, narrowed to fit in a context window. */
 export interface SiteDigest {
@@ -26,17 +37,21 @@ export interface GetHistoryResult {
   sites: SiteDigest[];
 }
 
-/** A page whose HTML now lives in the session sandbox rather than in context. */
+/** A scraped page, readable by the agent through `read` / `grep` / `glob`. */
+export interface PageFile {
+  /** The agent-facing path, e.g. `/pages/news_ycombinator_com_0.html`. */
+  path: string;
+  url: string;
+  title: string;
+  /** Sanitized, link-absolutized plain text — never raw HTML. */
+  text: string;
+}
+
+/** A page now readable by the agent, referenced by path rather than by content. */
 export interface PageRef {
   url: string;
   title: string;
-  /**
-   * The path the sandbox actually resolved, read back off the `resources.add()`
-   * response. Never the path we asked for — the API re-roots every file resource
-   * under `/mnt/session/uploads/`, so a requested `/workspace/x.html` lands at
-   * `/mnt/session/uploads/workspace/x.html`.
-   */
-  mountPath: string;
+  path: string;
   /** Lets the model choose grep-first over read-whole. */
   bytes: number;
 }
@@ -64,12 +79,13 @@ export interface ScrapedPage {
   /** Where the page ended up after redirects, when the host can tell. */
   finalUrl?: string;
   title: string;
-  html: string;
+  /** Rendered text: scripts, styles and markup removed, links absolutized. */
+  text: string;
 }
 
 /**
  * The two capabilities only a real browser has. Everything else the agent needs
- * (a filesystem, grep, read) is supplied by the session sandbox.
+ * (a filesystem, grep, read) is implemented in-process by `tools.ts`.
  */
 export interface BrowserBridge {
   getHistory(args: {
@@ -90,9 +106,86 @@ export interface KVStore {
   remove(key: string): Promise<void>;
 }
 
+// ---------------------------------------------------------------------------
+// the model
+// ---------------------------------------------------------------------------
+
+/** JSON Schema for a tool's input, shaped to suit both wire formats. */
+export interface ToolInputSchema {
+  type: "object";
+  properties: Record<string, unknown>;
+  required: string[];
+  [k: string]: unknown;
+}
+
+export interface ToolDefinition {
+  name: string;
+  description: string;
+  input_schema: ToolInputSchema;
+}
+
+export interface ToolCall {
+  /** Provider-assigned id, echoed back on the result. */
+  id: string;
+  name: string;
+  input: Record<string, unknown>;
+  /**
+   * Set when the provider streamed arguments that were not valid JSON. The
+   * dispatcher turns this into an `is_error` result instead of failing the run,
+   * so the model gets one chance to correct itself.
+   */
+  inputError?: string;
+}
+
+export interface ToolResult {
+  toolCallId: string;
+  name: string;
+  /** JSON, or plain text when the tool reports a failure. */
+  content: string;
+  isError?: boolean;
+}
+
+/**
+ * The transcript the orchestrator keeps, provider-agnostic. Every provider
+ * translates these three shapes into its own wire format, so switching models
+ * never changes the loop.
+ */
+export type Turn =
+  | { role: "user"; text: string }
+  | { role: "assistant"; text: string; toolCalls: ToolCall[] }
+  | { role: "tool_results"; results: ToolResult[] };
+
+export interface ModelRequest {
+  system: string;
+  turns: Turn[];
+  tools: ToolDefinition[];
+  maxTokens: number;
+  signal?: AbortSignal;
+}
+
+export interface ModelResponse {
+  text: string;
+  toolCalls: ToolCall[];
+  /** Provider-native stop reason, for logging. */
+  stopReason: string;
+}
+
+/**
+ * One provider call. Stateless: the orchestrator owns the transcript, so a run
+ * can move between models without any provider holding state.
+ */
+export interface ModelProvider {
+  /** Provider id, for logs and for the persisted run. */
+  readonly id: string;
+  complete(req: ModelRequest): Promise<ModelResponse>;
+}
+
+// ---------------------------------------------------------------------------
+// the run
+// ---------------------------------------------------------------------------
+
 export type RunPhase =
   | "setup"
-  | "session-create"
   | "thinking"
   | "history"
   | "scraping"
@@ -104,14 +197,17 @@ export type RunPhase =
 
 export interface RunCallbacks {
   onPhase?(phase: RunPhase, detail?: string): void;
-  /** Streamed assistant prose, for a progress panel. */
+  /** Assistant prose, for a progress panel. Arrives a turn at a time. */
   onText?(text: string): void;
   onLog?(line: string): void;
 }
 
 export interface HomepageBuildResult {
   code: string;
-  sessionId: string;
-  /** Where the code came from: a session output file, or a fenced block in the final message. */
-  source: "session-output" | "message-fence";
+  /** Local run id — there is no remote session to name. */
+  runId: string;
+  /** Model calls made. */
+  steps: number;
+  /** Where the code came from: the `write` tool, or a fenced block in the last message. */
+  source: "write-tool" | "message-fence";
 }

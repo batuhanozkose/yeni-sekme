@@ -1,7 +1,7 @@
-import Anthropic from "@anthropic-ai/sdk";
-import { runHomepageBuild, type RunPhase } from "@homepage/agent-core";
+import { createProvider, runHomepageBuild, type PersistedRun, type RunPhase } from "@homepage/agent-core";
 import { rebuildIntervalMs, shouldAutoRebuild } from "./auto-rebuild";
 import { browserBridge } from "./browser-bridge";
+import { makeT, type Language } from "./i18n";
 import {
   INITIAL_BUILD_STATE,
   LOG_RETENTION,
@@ -10,7 +10,15 @@ import {
   type BuildState,
   type PageMsg,
 } from "./protocol";
-import { KEYS, extensionStore, loadHomepage, loadSettings, saveHomepage } from "./storage";
+import {
+  KEYS,
+  extensionStore,
+  hasCredentials,
+  loadHomepage,
+  loadSettings,
+  missingSetup,
+  saveHomepage,
+} from "./storage";
 
 type Port = Parameters<Parameters<typeof browser.runtime.onConnect.addListener>[0]>[0];
 
@@ -82,10 +90,10 @@ export class BuildManager {
   // ---- heartbeat -----------------------------------------------------------
 
   /**
-   * Called on worker wake and on every alarm tick. If a session was left
-   * mid-flight, reattach and continue (lossless — the orchestrator replays the
-   * event log and re-answers orphaned tool calls). Otherwise, consider the daily
-   * rebuild. The single-flight lock is the arbiter that keeps these from racing.
+   * Called on worker wake and on every alarm tick. If a run was left mid-flight,
+   * reattach and continue (lossless — the transcript is in storage and any
+   * unanswered tool call is re-executed). Otherwise, consider the daily rebuild.
+   * The single-flight lock is the arbiter that keeps these from racing.
    */
   async tick() {
     if (this.running) {
@@ -95,8 +103,8 @@ export class BuildManager {
       return;
     }
 
-    const sessionId = await extensionStore.get<string>(KEYS.activeSessionId);
-    if (sessionId) {
+    const run = await extensionStore.get<PersistedRun>(KEYS.activeRun);
+    if (run) {
       void this.startBuild({ resume: true });
       return;
     }
@@ -116,7 +124,7 @@ export class BuildManager {
     if (
       !shouldAutoRebuild({
         enabled: settings.autoRebuild,
-        hasApiKey: Boolean(settings.apiKey),
+        hasApiKey: hasCredentials(settings),
         isRunning: this.running,
         lastBuildTimestamp: homepage?.timestamp,
         lastAutoAttemptTimestamp: lastAttempt,
@@ -141,12 +149,16 @@ export class BuildManager {
       return; // single-flight: a second start just attaches.
     }
 
-    const { apiKey, systemPrompt, model } = await loadSettings();
-    if (!apiKey) {
-      // Manual builds are gated behind the key-setup screen and auto-builds
-      // require a key, so this only happens if the key was removed.
-      console.warn("[BuildManager] startBuild aborted — no API key in storage");
-      const message = "No Anthropic API key found. Add your key and try again.";
+    const settings = await loadSettings();
+    const language: Language = settings.language;
+    const t = makeT(language);
+
+    const missing = missingSetup(settings);
+    if (missing) {
+      // Manual builds are gated behind the setup screen and auto-builds require
+      // credentials, so this only happens if a setting was removed.
+      console.warn(`[BuildManager] startBuild aborted — ${missing} missing`);
+      const message = t("error.noCredentials", { provider: settings.spec.label });
       this.state = { ...INITIAL_BUILD_STATE, phase: "error", error: message };
       this.broadcast({ kind: "error", message });
       return;
@@ -157,25 +169,30 @@ export class BuildManager {
     this.state = { ...INITIAL_BUILD_STATE, running: true, phase: "setup" };
     this.broadcast({ kind: "snapshot", state: this.state });
     this.startKeepalive();
-    console.log("[BuildManager] build started", { resume: Boolean(opts.resume) });
+    console.log("[BuildManager] build started", {
+      resume: Boolean(opts.resume),
+      provider: settings.provider,
+      model: settings.model,
+    });
 
     try {
       // The key is the user's own, read from local storage — there is no server
       // to hide it behind. See ARCHITECTURE.md → Privacy.
-      const client = new Anthropic({ apiKey, dangerouslyAllowBrowser: true });
-
-      const resumeSessionId = opts.resume
-        ? await extensionStore.get<string>(KEYS.activeSessionId)
-        : undefined;
+      const provider = createProvider({
+        spec: settings.spec,
+        apiKey: settings.apiKey,
+        model: settings.model,
+        baseUrl: settings.baseUrl,
+      });
 
       const result = await runHomepageBuild({
-        client,
+        provider,
         bridge: browserBridge,
         store: extensionStore,
-        userSystemPrompt: systemPrompt,
+        userSystemPrompt: settings.systemPrompt,
         blockedSites: async () => (await loadSettings()).blockedSites,
-        model,
-        resumeSessionId,
+        language,
+        resume: opts.resume,
         signal: this.controller.signal,
         callbacks: {
           onPhase: (phase, detail) => this.onPhase(phase, detail),
@@ -190,13 +207,17 @@ export class BuildManager {
       this.state = { ...this.state, running: false, phase: "done" };
       this.broadcast({ kind: "done", code: result.code });
       await this.mirror(true);
-      console.log("[BuildManager] build done", { bytes: result.code.length, source: result.source });
+      console.log("[BuildManager] build done", {
+        bytes: result.code.length,
+        source: result.source,
+        steps: result.steps,
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.state = { ...this.state, running: false, phase: "error", error: message };
       this.broadcast({ kind: "error", message });
       await this.mirror(true);
-      this.notifyFailure(message);
+      this.notifyFailure(message, t);
       console.error("[BuildManager] build failed", error);
     } finally {
       this.running = false;
@@ -268,7 +289,7 @@ export class BuildManager {
   private startKeepalive() {
     this.keepalive ??= setInterval(() => {
       // A cheap chrome API call resets the ~30s idle-unload timer while a turn is
-      // in flight (the in-flight session fetch does most of the work; this covers
+      // in flight (the in-flight model fetch does most of the work; this covers
       // the gaps between requests).
       void browser.runtime.getPlatformInfo();
     }, KEEPALIVE_INTERVAL_MS);
@@ -281,7 +302,7 @@ export class BuildManager {
 
   // ---- failure surfacing ---------------------------------------------------
 
-  private notifyFailure(message: string) {
+  private notifyFailure(message: string, t: ReturnType<typeof makeT>) {
     // Only ping when nobody is watching — an open tab already shows the error
     // inline. A headless daily build that fails otherwise vanishes silently.
     if (this.ports.size > 0) return;
@@ -289,7 +310,7 @@ export class BuildManager {
       browser.notifications.create({
         type: "basic",
         iconUrl: browser.runtime.getURL("/icon/128.png"),
-        title: "Homepage build failed",
+        title: t("notify.failed"),
         message: message.slice(0, 200),
       });
     } catch {

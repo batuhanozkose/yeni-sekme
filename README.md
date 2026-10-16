@@ -14,20 +14,21 @@ A morning newspaper is just one look. You can describe any look and the next bui
 follows it: a quiet one-column digest, a dense dashboard, a green-on-black
 terminal, a zine.
 
-> **Privacy, up front.** To build your homepage, the extension sends a summary of
-> your browsing history (top domains, visit counts, a few page titles) and the
-> cleaned-up HTML of up to 8 pages to the Anthropic API, using your own API key.
-> Those pages are loaded in your signed-in browser, so they can include private
-> content. The agent session and every uploaded page are deleted when each build
-> ends. Your API key stays in the extension's local storage. More detail in
-> [ARCHITECTURE.md](./ARCHITECTURE.md#privacy).
+> **Privacy, up front.** The agent runs inside the extension. It reads your history
+> in the browser and opens pages in your signed-in browser, then sends that
+> material — the domains it visited, a few page titles, and the text of up to 8
+> pages — to the model provider you configure, using your own key. Nothing goes
+> anywhere else: there is no server in this project and no sandbox to upload pages
+> to. Point it at a local model and nothing leaves your machine at all. More detail
+> in [ARCHITECTURE.md](./ARCHITECTURE.md#privacy).
 
 ---
 
 ## Install
 
 You need Chrome (or another Chromium browser), [Node.js](https://nodejs.org) 20+,
-and an [Anthropic API key](https://console.anthropic.com).
+and an API key for a model provider (or [Ollama](https://ollama.com) running
+locally, which needs none).
 
 ```bash
 git clone https://github.com/ThariqS/ai-newtab.git
@@ -48,7 +49,7 @@ If Chrome asks whether to keep the changed new-tab page, choose **Keep it**.
 
 ## Your first homepage
 
-1. Open a new tab and paste your Anthropic API key.
+1. Open a new tab, pick a provider and paste your API key.
 2. Click **Build today's homepage**.
 3. Watch it work. The progress view walks through each step: preparing the
    agent, reading your history, opening pages in your browser, analyzing them,
@@ -58,12 +59,35 @@ The first build takes a few minutes. You can close the tab while it runs, since
 the build lives in the extension's background worker and appears in any new tab
 you open.
 
+## Choose your model
+
+Click **⚙️ Settings** on the new tab. Any of these work, with your own key:
+
+| Provider | Notes |
+| --- | --- |
+| **Anthropic** (default) | Claude. `claude-sonnet-5-5` is the default model. |
+| **OpenAI** | `gpt-4o`, `gpt-4o-mini`, anything you have access to. |
+| **OpenRouter** | One key, most models. Use `provider/model` ids. |
+| **Groq** | Fast hosted open models. |
+| **Ollama** | Local, no key, no cost. Needs `ollama serve` running. |
+| **Custom** | Any OpenAI-compatible endpoint: something you host, a gateway, or a proxy. Give it the base URL including its `/v1`. |
+
+The model field is free text, with the common ids offered as suggestions —
+model names change faster than this README does. The new model takes effect from
+your next build, and **Resume interrupted build** will finish a half-done build
+with a different provider than it started with: the transcript belongs to the
+extension, not to a provider.
+
+Two things worth knowing before you pick a small local model: the build is a
+four-step tool loop (read history → scrape → grep/read → write), and weaker models
+tend to skip steps or invent links. Claude and the larger hosted models follow it
+reliably; a 3B local model mostly does not.
+
 ## Make it yours
 
-Click **⚙️ Settings** on the new tab.
-
-**Instructions.** Anything you write here goes into every build and takes priority
-over the agent's own defaults. This box sets both the content and the look:
+The **Instructions** box is the main lever. Anything you write here goes into every
+build and takes priority over the agent's own defaults. It sets both the content
+and the look:
 
 | You write | You get |
 | --- | --- |
@@ -77,18 +101,15 @@ Click **Save & rebuild** to apply them right away.
 
 **Sites the agent never reads.** Enter one host per line; subdomains are included,
 and `*.example.com` is supported. The editable defaults include common webmail,
-sign-in and document hosts. **Save & rebuild** saves the list and applies it to
-history summaries and URLs requested through `getPageHtml`. A page that redirects
-onto a blocked host is dropped before its content is uploaded. Local-network
-addresses (localhost, private IPs, `.local` and `.internal` hosts) are always blocked.
+sign-in and document hosts. They are applied to history summaries and to every URL
+requested through `getPageHtml`, and a page that redirects onto a blocked host is
+dropped before the agent can read a word of it. Local-network addresses (localhost,
+private IPs, `.local` and `.internal` hosts) are always blocked.
 
-**Model.** Choose which Claude model writes your page:
-
-- **Claude Sonnet 5.5** (default): the best balance of quality and cost.
-- **Claude Haiku 5.5**: the fastest and cheapest.
-- **Claude Opus 5.5**: the most careful editor, and the most expensive.
-
-The new model takes effect from your next build.
+**Language.** English or Türkçe, defaulting to your browser's language. It switches
+the extension's own interface and the language the page is written in. Headlines
+and post titles stay exactly as they were found — a Turkish page that silently
+rewrote an English headline would misquote the link next to it.
 
 **Rebuild automatically.** On by default. Once your homepage is older than the
 interval you pick (6, 12, 24 or 48 hours), the extension rebuilds it quietly in the
@@ -99,16 +120,18 @@ failed build until the next interval, so it never loops.
 
 ## Good to know
 
-- **Cost.** Each build is a single agent session billed to your API key. What it
-  costs depends on the model and on how much it reads. Haiku is the cheapest
-  choice, and you can turn off automatic rebuilds to build only when you ask.
+- **Cost.** Each build is a handful of model calls billed to your key. What it
+  costs depends on the model and on how much it reads. A local model is free, and
+  you can turn off automatic rebuilds to build only when you ask.
 - **What it can see.** It ranks the sites in your history and opens up to 8 of
   them per build. It skips search engines, webmail, banking and logged-out
   marketing pages. Anything it can't open is reported, not hidden.
-- **Links are real.** Every link on the page comes from a page the agent actually
-  read. It's told never to invent a URL.
+- **Links are real.** Pages are rendered to text with their links already
+  absolutized, and the agent is told to copy them exactly. It's told never to
+  invent a URL.
 - **Interrupted builds.** If Chrome closes mid-build, the new tab offers
-  **Resume interrupted build** next time.
+  **Resume interrupted build** next time. The half-finished transcript is on disk,
+  and nothing the build read is kept once it ends.
 - **Updating.** After pulling new code, run `npx pnpm@10.11.1 build` again, then
   click the reload icon on the extension in `chrome://extensions`.
 
@@ -116,44 +139,44 @@ failed build until the next interval, so it never loops.
 
 1. **`getHistory`**: the agent gets a ranked summary of your most-visited domains.
 2. **`getPageHtml`**: it picks up to 8 pages, which the extension opens in a
-   background window, cleans up, and mounts into the agent's sandbox as files.
+   background window and renders to readable text.
 3. **`grep` / `read`**: the agent pulls headlines, posts and links out of those
-   files inside its sandbox.
+   pages.
 4. **`write`**: it writes one React component, which the new tab renders.
 
-The extension's background worker drives a
-[Claude Managed Agents](https://docs.claude.com) session directly, with no server
-in between. The two custom tools run in the extension because they need
-`chrome.history` and `chrome.tabs`. Everything else happens in the agent's
-sandbox, where shell access is off: scraped pages are untrusted input.
+All of that happens in the extension's service worker, in one process, with no
+server in between. Only the model call leaves the machine, going straight to the
+provider you configured with your own key.
 
-See **[ARCHITECTURE.md](./ARCHITECTURE.md)** for the event flow, the layout, and
-the gotchas worth knowing.
+See **[ARCHITECTURE.md](./ARCHITECTURE.md)** for the loop, the layout, and the
+gotchas worth knowing.
 
 ## Development
 
 ```
 packages/agent-core   the agent loop: host-agnostic, no chrome.* or node:*
 apps/extension        the MV3 extension (WXT + React)
-harness               Bun scripts that run agent-core outside Chrome, and test the built extension
+harness               Bun scripts that drive the loop outside Chrome, and test the built extension
 ```
 
 ```bash
 pnpm dev                 # WXT with hot reload
 pnpm typecheck           # all packages
-pnpm test                # unit tests (no API calls; needs Bun)
+pnpm test                # the loop, tools and resume — scripted provider, no API calls (needs Bun)
+pnpm agent:resume-test   # kill a build mid-tool-call and watch it recover (no API calls)
 pnpm extension:test      # loads the built extension into headless Chrome (no API calls)
 
-cp .env.example .env     # add ANTHROPIC_API_KEY, then:
-pnpm agent:run           # a full build against the real API, with fixture history
+cp .env.example .env     # add a provider key, then:
+pnpm agent:run           # a full build against a real provider, with fixture history
 pnpm agent:verify        # check the output actually renders
+pnpm agent:retention     # check nothing it read is left on disk
 ```
 
 ## Status
 
 Early and experimental. It's a tool you run yourself with your own key. Don't
 publish it to a store as-is: anyone with access to the browser profile can read
-the stored API key.
+the stored key.
 
 ## License
 

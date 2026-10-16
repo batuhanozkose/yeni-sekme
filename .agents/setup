@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+#
+# Prepares a fresh orb to build, test and develop AI Homepage.
+#
+# There is no server, no database and no long-lived process in this project: the
+# extension is bundled from source and the test suites run on Bun. So setup is
+# the workspace dependencies, plus one warm build so `pnpm extension:test` can run
+# without a first step. node, bun, pnpm and Chrome all come from the orb image —
+# harness/test-extension.ts discovers Chrome itself, so nothing here sets
+# CHROME_PATH.
+#
+# Idempotent, and a warm run is a few seconds: pnpm verifies the lockfile against
+# the restored node_modules tree and does nothing else.
+
+set -euo pipefail
+
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
+started=$SECONDS
+
+step() { printf '── %s\n' "$*"; }
+have() { command -v -- "$1" >/dev/null 2>&1; }
+
+step "repo $(pwd)"
+
+# --- system packages --------------------------------------------------------
+missing=()
+for tool in git curl; do
+  have "$tool" || missing+=("$tool")
+done
+if ((${#missing[@]})); then
+  step "apt-get install ${missing[*]}"
+  apt-get update -qq
+  apt-get install -y -qq "${missing[@]}"
+fi
+
+# The base image provides these; installing a Node toolchain here would be a
+# worse pin than the image's own, so fail loudly instead of guessing.
+for tool in node bun pnpm; do
+  if ! have "$tool"; then
+    echo "!! $tool is missing from this orb image and setup does not install it" >&2
+    exit 1
+  fi
+done
+step "node $(node -v) · bun $(bun --version) · pnpm $(pnpm --version)"
+
+# --- dependencies -----------------------------------------------------------
+# pnpm's lockfile check is the fingerprint: it installs only what node_modules is
+# missing, and fails rather than silently resolving something new.
+step "pnpm install --frozen-lockfile"
+pnpm install --frozen-lockfile
+
+# --- warm build -------------------------------------------------------------
+# Cheap, deterministic, and it means a fresh orb can run `pnpm extension:test`
+# straight away. Output is gitignored and travels in the snapshot.
+step "pnpm build"
+pnpm build
+
+step "ready in $((SECONDS - started))s"
+echo "   pnpm test · pnpm extension:test · pnpm agent:resume-test  (no API key needed)"
+echo "   pnpm agent:run and the agent:* scripts need a key in .env — see .env.example"

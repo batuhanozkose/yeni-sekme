@@ -1,14 +1,16 @@
 /**
- * Privacy check: the session event log holds every domain, title and page body
- * we sent, and uploaded files persist independently. Confirm both are gone after
- * a build.
+ * Privacy check: after a build, nothing it read is still on disk.
  *
- * Run: pnpm agent:retention [sessionId]   (sessionId is printed by pnpm agent:run)
+ * There is no remote session to delete any more — but the run in progress is
+ * persisted locally between model calls so a killed worker can pick it up, and
+ * that record holds every domain and page body the agent read. It must not
+ * outlive the build.
+ *
+ * Run: pnpm agent:retention   (after pnpm agent:run)
  */
-import Anthropic from "@anthropic-ai/sdk";
-
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! });
-const sessionId = process.argv[2];
+import { STORAGE_KEYS } from "@homepage/agent-core";
+import { existsSync, readFileSync } from "node:fs";
+import { STATE_PATH } from "./node-bridge";
 
 let failures = 0;
 const check = (label: string, pass: boolean) => {
@@ -16,30 +18,30 @@ const check = (label: string, pass: boolean) => {
   if (!pass) failures++;
 };
 
-if (sessionId) {
-  let gone = false;
-  try {
-    const session = await client.beta.sessions.retrieve(sessionId);
-    gone = session.status === "terminated";
-    console.log(`   session ${sessionId} still retrievable, status=${session.status}`);
-  } catch (err: any) {
-    gone = err?.status === 404;
-    if (!gone) console.log(`   unexpected error: ${err?.status} ${err?.message}`);
-  }
-  check(`session ${sessionId} deleted`, gone);
+if (!existsSync(STATE_PATH)) {
+  console.log(`   no harness state yet (${STATE_PATH}) — nothing to leak`);
+  check("no run left mid-flight", true);
+  check("no scraped page bodies left on disk", true);
+} else {
+  const state = JSON.parse(readFileSync(STATE_PATH, "utf-8")) as Record<string, unknown>;
+  const run = state[STORAGE_KEYS.activeRun] as { turns?: unknown[] } | undefined;
+  const pages = state[STORAGE_KEYS.runPages] as Array<{ path: string }> | undefined;
+
+  if (run) console.log(`   a run is still in progress: ${run.turns?.length ?? "?"} turn(s)`);
+  check("no run left mid-flight", run === undefined);
+
+  if (pages?.length) console.log(`   still stored: ${pages.map((page) => page.path).join(", ")}`);
+  check("no scraped page bodies left on disk", pages === undefined);
 }
 
-// Any file we uploaded for mounting is an HTML page body. None should survive.
-const lingering: string[] = [];
-for await (const file of client.beta.files.list()) {
-  if (file.mime_type === "text/html" || /\.html$/.test(file.filename)) {
-    lingering.push(`${file.id} ${file.filename} (${file.size_bytes}b)`);
-  }
-}
-check(`no scraped page bodies left in the Files API`, lingering.length === 0);
-if (lingering.length) {
-  console.log("   lingering:");
-  for (const l of lingering.slice(0, 10)) console.log(`     ${l}`);
+// The cached ids the old remote orchestrator kept are gone with it; make sure a
+// stale one cannot linger in a state file carried over from an older checkout.
+const legacyKeys = ["agentId", "environmentId", "activeSessionId", "uploadedFileIds"];
+if (existsSync(STATE_PATH)) {
+  const state = JSON.parse(readFileSync(STATE_PATH, "utf-8")) as Record<string, unknown>;
+  const stale = legacyKeys.filter((key) => key in state || Object.keys(state).some((k) => k.startsWith(`${key}-`)));
+  check("no leftover remote-orchestrator state", stale.length === 0);
+  if (stale.length) console.log(`   stale keys: ${stale.join(", ")}`);
 }
 
 process.exit(failures === 0 ? 0 : 1);

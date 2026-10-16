@@ -1,4 +1,5 @@
-export const OUTPUT_PATH = "/mnt/session/outputs/homepage.tsx";
+import { OUTPUT_PATH } from "./schemas";
+import type { Language } from "./types";
 
 /**
  * One system prompt for the whole build: choose pages, extract items, write the
@@ -7,11 +8,12 @@ export const OUTPUT_PATH = "/mnt/session/outputs/homepage.tsx";
 export const HOMEPAGE_SYSTEM_PROMPT = `You build a personalized browser homepage from the user's own browsing history.
 
 You have four capabilities:
-- getHistory (custom tool) — a ranked digest of the user's most-visited domains.
-- getPageHtml (custom tool) — loads URLs in the user's REAL browser and mounts the
-  sanitized HTML into your sandbox. Authenticated, JS-rendered pages work: the
-  logged-in timeline, the private dashboard, the subscribed newsletter.
-- grep / glob / read — operate on those mounted files inside your sandbox.
+- getHistory (tool) — a ranked digest of the user's most-visited domains.
+- getPageHtml (tool) — loads URLs in the user's REAL browser, renders each page to
+  readable text, and makes it available to glob/grep/read at the path it returns.
+  Authenticated, JS-rendered pages work: the logged-in timeline, the private
+  dashboard, the subscribed newsletter.
+- grep / glob / read — operate on those pages.
 - write — your only way to deliver the finished homepage.
 
 ## Workflow
@@ -25,10 +27,9 @@ You have four capabilities:
    tools, and anything that is obviously a logged-out marketing page. Scrape the
    domain root unless a specific path is clearly the content surface.
 
-3. Call getPageHtml with those URLs. It returns a mountPath and a byte count per
-   page. USE THE RETURNED mountPath VERBATIM — do not construct paths yourself,
-   do not assume a page lives where you asked for it, and do not re-call
-   getPageHtml to find a file. If a path seems missing, glob for it.
+3. Call getPageHtml with those URLs. It returns a path and a byte count per page.
+   USE THE RETURNED path VERBATIM — do not construct paths yourself, and do not
+   re-call getPageHtml to find a page. If a path seems missing, glob for it.
    Large pages: grep first to locate the interesting region, then read that range.
    Small pages: read them whole.
 
@@ -36,8 +37,10 @@ You have four capabilities:
    - headlines, articles, posts, product announcements, releases
    - social posts, discussion threads, notifications worth acting on
    - anything trending, featured, or time-sensitive
-   For each item capture its text, its link (absolutize relative hrefs against the
-   page's origin), and an image URL when one is genuinely associated with it.
+   For each item capture its text, its link, and an image URL when one is
+   genuinely associated with it. Links in the page text are already absolute and
+   appear in angle brackets like <https://example.com/story> — copy them exactly
+   as written, never rebuild one from a relative href.
    Ignore navigation, ads, footers, cookie banners, login walls, and generic
    promotional boilerplate. Aim for up to ~10 items per page — the best ones, not
    the first ten.
@@ -78,7 +81,10 @@ built and why. Do not paste the component source into your reply.`;
 export interface KickoffInput {
   now: Date;
   userSystemPrompt?: string;
+  language?: Language;
 }
+
+const LOCALES: Record<Language, string> = { en: "en-US", tr: "tr-TR" };
 
 export function getTimeOfDay(date: Date): "morning" | "afternoon" | "evening" | "night" {
   const hour = date.getHours();
@@ -88,23 +94,44 @@ export function getTimeOfDay(date: Date): "morning" | "afternoon" | "evening" | 
   return "night";
 }
 
-export function buildKickoffMessage({ now, userSystemPrompt }: KickoffInput): string {
-  const dateLine = now.toLocaleDateString("en-US", {
+const TIME_OF_DAY_LABELS: Record<Language, Record<ReturnType<typeof getTimeOfDay>, string>> = {
+  en: { morning: "morning", afternoon: "afternoon", evening: "evening", night: "night" },
+  tr: { morning: "sabah", afternoon: "öğleden sonra", evening: "akşam", night: "gece" },
+};
+
+/**
+ * The page's own copy follows the interface language, but headlines and titles
+ * are quoted material: translating them would make the page disagree with the
+ * sources it links to.
+ */
+const LANGUAGE_INSTRUCTIONS: Record<Language, string> = {
+  en: "",
+  tr:
+    "Write the page's own copy in Turkish: section headings, labels, button text, " +
+    "and any commentary you add. Keep headlines, post titles and usernames exactly " +
+    "as you found them in the source.",
+};
+
+export function buildKickoffMessage({ now, userSystemPrompt, language = "en" }: KickoffInput): string {
+  const dateLine = now.toLocaleDateString(LOCALES[language], {
     weekday: "long",
     year: "numeric",
     month: "long",
     day: "numeric",
   });
+  const timeOfDay = TIME_OF_DAY_LABELS[language][getTimeOfDay(now)];
+  const languageInstruction = LANGUAGE_INSTRUCTIONS[language];
 
   return [
     `Build today's homepage.`,
     ``,
     `Context:`,
     `- Date: ${dateLine}`,
-    `- Time of day: ${getTimeOfDay(now)}`,
+    `- Time of day: ${timeOfDay}`,
     userSystemPrompt?.trim()
       ? `\nThe user's standing instructions (these take priority over your defaults):\n${userSystemPrompt.trim()}`
       : ``,
+    languageInstruction ? `\n${languageInstruction}` : ``,
     ``,
     `Start with getHistory, then scrape, then write ${OUTPUT_PATH}.`,
   ]
